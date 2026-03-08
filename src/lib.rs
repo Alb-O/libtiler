@@ -20,5 +20,8 @@ pub use preset::{BalancedPreset, DwindlePreset, PresetKind, TallPreset, WidePres
 pub use resize::ResizeStrategy;
 pub use session::{RebalanceMode, Session};
 pub use snapshot::{ScoreTuple, Snapshot, SplitTrace, Violation, ViolationKind};
-pub use solver::{OverflowMode, ShortageMode, SolverPolicy, choose_extent, solve, solve_strict};
+pub use solver::{
+    OverflowMode, PairSpec, ShortageMode, SolverPolicy, TieBreakMode, choose_extent,
+    choose_extent_with_score, score, solve, solve_strict, summarize,
+};
 pub use tree::{LeafNode, Node, SplitNode, Tree};

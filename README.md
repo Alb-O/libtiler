@@ -1,45 +1,75 @@
-# Order Quote CLI (rust-app)
+# libtiler
 
-Practical app repo for the Rust polyrepo setup.
+`libtiler` is a deterministic binary split tiling library for editor and TUI layouts.
 
-Uses `env-rust` and `materializer`.
+It implements the design in [`docs/001.design_spec_v1.md`](docs/001.design_spec_v1.md):
 
-The app is a CLI used by commerce teams to generate shipping quotes.
+- single-root binary split trees
+- exact half-open integer rectangles
+- pure best-effort solver with strict feasibility certification
+- hard leaf min/max constraints and shrink priorities
+- snapshot-gated geometry operations
+- structural edits, presets, navigation, and edge-eligible resize
 
-## Commands
+## Crate model
 
-```bash
-# health payload
-cargo run -- health
+The library is intentionally split into two layers.
 
-# quote payload
-cargo run -- quote 12500 15 express --fragile
+- Core: topology, metadata, validation, summaries, and solving
+- Session: focus, selection, geometry-driven commands, and revision tracking
+
+Public modules are re-exported from `libtiler` for ergonomic use.
+
+## Example
+
+```rust
+use libtiler::{
+    Axis, Direction, LeafMeta, Rect, ResizeStrategy, Session, Slot, SolverPolicy,
+};
+
+let mut session = Session::new();
+let _a = session.insert_root("main", LeafMeta::default())?;
+let _b = session.split_focus(Axis::X, Slot::B, "side", LeafMeta::default(), None)?;
+let _c = session.wrap_selection(Axis::Y, Slot::B, "log", LeafMeta::default(), None)?;
+
+let root = Rect { x: 0, y: 0, w: 120, h: 40 };
+let snap = session.solve(root, &SolverPolicy::default());
+session.focus_dir(Direction::Right, &snap)?;
+session.grow_focus(Direction::Down, 4, ResizeStrategy::Local, &snap)?;
+
+let solved = session.solve(root, &SolverPolicy::default());
+assert!(solved.strict_feasible);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Devenv helpers
+## Presets and rebalancing
+
+Included subtree rebuild presets:
+
+- `Balanced`
+- `Dwindle`
+- `Tall`
+- `Wide`
+
+Included rebalance modes:
+
+- `BinaryEqual`
+- `LeafCount`
+
+## Validation and testing
+
+The crate ships with:
+
+- exact allocator oracle checks
+- reference-solver comparisons
+- raster partition proofs
+- brute-force summary envelope checks
+- symmetry and roundtrip regression tests
+- end-to-end session mutation, navigation, preset, and resize coverage
+
+Run the full suite with:
 
 ```bash
-devenv shell
-quote-example
-health
-packaged-health
-```
-
-## Output for other repos
-
-This repo exports:
-
-- `outputs.order-quote-cli`
-- `outputs.materialized_text` (merged instructions from import chain)
-
-Other repos can run:
-
-```bash
-${config.outputs.order-quote-cli}/bin/order-quote-cli health
-```
-
-## Validate
-
-```bash
-devenv test
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```

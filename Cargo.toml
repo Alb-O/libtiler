@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "Deterministic binary split tiling library with certified integer layout solving"
 license = "MIT"
-repository = "https://example.invalid/libtiler"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

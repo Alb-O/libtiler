@@ -313,6 +313,9 @@ impl<T> Session<T> {
         if self.tree.is_leaf(selection) {
             return Ok(());
         }
+        if self.subtree_matches_preset(selection, preset)? {
+            return Ok(());
+        }
         let focus = self.focus_leaf()?;
         let old_selection = self.selection;
         let parent = self.tree.parent_of(selection);
@@ -474,6 +477,18 @@ impl<T> Session<T> {
         }
     }
 
+    fn subtree_matches_preset(&self, root: NodeId, preset: PresetKind) -> Result<bool, OpError> {
+        let leaves = self.tree.leaf_ids_dfs(root);
+        match preset {
+            PresetKind::Balanced(preset) => Ok(self.matches_balanced(root, &leaves, preset)),
+            PresetKind::Dwindle(preset) => {
+                Ok(self.matches_dwindle(root, &leaves, preset.start_axis, preset.new_leaf_slot))
+            }
+            PresetKind::Tall(preset) => Ok(self.matches_tall(root, &leaves, preset)),
+            PresetKind::Wide(preset) => Ok(self.matches_wide(root, &leaves, preset)),
+        }
+    }
+
     fn build_balanced(
         &mut self,
         leaves: &[NodeId],
@@ -581,6 +596,133 @@ impl<T> Session<T> {
             rest,
             canonicalize_weights(1, (leaves.len() - 1) as u32),
         ))
+    }
+
+    fn matches_balanced(&self, id: NodeId, leaves: &[NodeId], preset: BalancedPreset) -> bool {
+        if leaves.is_empty() {
+            return false;
+        }
+        if leaves.len() == 1 {
+            return self.tree.is_leaf(id) && id == leaves[0];
+        }
+        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
+            return false;
+        };
+        if split.axis != preset.start_axis {
+            return false;
+        }
+        let mid = leaves.len().div_ceil(2);
+        if split.weights != canonicalize_weights(mid as u32, (leaves.len() - mid) as u32) {
+            return false;
+        }
+        let next = BalancedPreset {
+            start_axis: if preset.alternate {
+                toggle_axis(preset.start_axis)
+            } else {
+                preset.start_axis
+            },
+            alternate: preset.alternate,
+        };
+        self.matches_balanced(split.a, &leaves[..mid], next)
+            && self.matches_balanced(split.b, &leaves[mid..], next)
+    }
+
+    fn matches_dwindle(&self, id: NodeId, leaves: &[NodeId], axis: Axis, slot: Slot) -> bool {
+        if leaves.is_empty() {
+            return false;
+        }
+        if leaves.len() == 1 {
+            return self.tree.is_leaf(id) && id == leaves[0];
+        }
+        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
+            return false;
+        };
+        if split.axis != axis || split.weights != WeightPair::default() {
+            return false;
+        }
+        match slot {
+            Slot::A => {
+                split.b == leaves[0]
+                    && self.tree.is_leaf(split.b)
+                    && self.matches_dwindle(split.a, &leaves[1..], toggle_axis(axis), slot)
+            }
+            Slot::B => {
+                split.a == leaves[0]
+                    && self.tree.is_leaf(split.a)
+                    && self.matches_dwindle(split.b, &leaves[1..], toggle_axis(axis), slot)
+            }
+        }
+    }
+
+    fn matches_tall(&self, id: NodeId, leaves: &[NodeId], preset: TallPreset) -> bool {
+        if leaves.is_empty() {
+            return false;
+        }
+        if leaves.len() == 1 {
+            return self.tree.is_leaf(id) && id == leaves[0];
+        }
+        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
+            return false;
+        };
+        if split.axis != Axis::X || split.weights != preset.root_weights {
+            return false;
+        }
+        match preset.master_slot {
+            Slot::A => {
+                split.a == leaves[0]
+                    && self.tree.is_leaf(split.a)
+                    && self.matches_equal_linear(split.b, &leaves[1..], Axis::Y)
+            }
+            Slot::B => {
+                split.b == leaves[0]
+                    && self.tree.is_leaf(split.b)
+                    && self.matches_equal_linear(split.a, &leaves[1..], Axis::Y)
+            }
+        }
+    }
+
+    fn matches_wide(&self, id: NodeId, leaves: &[NodeId], preset: WidePreset) -> bool {
+        if leaves.is_empty() {
+            return false;
+        }
+        if leaves.len() == 1 {
+            return self.tree.is_leaf(id) && id == leaves[0];
+        }
+        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
+            return false;
+        };
+        if split.axis != Axis::Y || split.weights != preset.root_weights {
+            return false;
+        }
+        match preset.master_slot {
+            Slot::A => {
+                split.a == leaves[0]
+                    && self.tree.is_leaf(split.a)
+                    && self.matches_equal_linear(split.b, &leaves[1..], Axis::X)
+            }
+            Slot::B => {
+                split.b == leaves[0]
+                    && self.tree.is_leaf(split.b)
+                    && self.matches_equal_linear(split.a, &leaves[1..], Axis::X)
+            }
+        }
+    }
+
+    fn matches_equal_linear(&self, id: NodeId, leaves: &[NodeId], axis: Axis) -> bool {
+        if leaves.is_empty() {
+            return false;
+        }
+        if leaves.len() == 1 {
+            return self.tree.is_leaf(id) && id == leaves[0];
+        }
+        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
+            return false;
+        };
+        split.axis == axis
+            && split.weights == canonicalize_weights(1, (leaves.len() - 1) as u32)
+            && split.a == leaves[0]
+            && self.tree.is_leaf(split.a)
+            && self.matches_equal_linear(split.b, &leaves[1..], axis)
     }
 
     fn rebalance_subtree(&mut self, id: NodeId, mode: RebalanceMode) -> Result<u32, OpError> {
