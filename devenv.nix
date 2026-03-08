@@ -12,10 +12,7 @@ let
     else "";
 in
 {
-  materializer.ownFragments.rust-app = [ appAgentsText ];
-  materializer.mergedFragments = lib.mkAfter [ appAgentsText ];
-
-  treefmt.config.programs.mdformat.enable = true;
+  instructions.fragments = lib.mkAfter [ appAgentsText ];
 
   env = {
     SERVICE_NAME = "order-quote-cli";

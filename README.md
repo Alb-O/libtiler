@@ -2,11 +2,7 @@
 
 Practical app repo for the Rust polyrepo setup.
 
-This repository imports:
-
-- `github:Alb-O/env-rust` for the shared nightly Rust toolchain and checks.
-- `github:Alb-O/materializer` for merged agents instructions output.
-- `treefmt` is extended locally with `mdformat` for Markdown docs.
+Uses `env-rust` and `materializer`.
 
 The app is a CLI used by commerce teams to generate shipping quotes.
 
@@ -36,7 +32,7 @@ This repo exports:
 - `outputs.order-quote-cli`
 - `outputs.materialized_text` (merged instructions from import chain)
 
-Another repo can import this repo and execute:
+Other repos can run:
 
 ```bash
 ${config.outputs.order-quote-cli}/bin/order-quote-cli health
