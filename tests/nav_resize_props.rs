@@ -24,7 +24,7 @@ fn split_weights(session: &Session<u8>, split_id: NodeId) -> WeightPair {
         .tree()
         .split(split_id)
         .expect("split should exist")
-        .weights
+        .weights()
 }
 
 fn left_edge(rect: libtiler::Rect) -> i32 {
@@ -359,7 +359,7 @@ fn resize_oracle_and_session_agree_on_eligible_split_order() {
 }
 
 #[test]
-fn raw_path_slack_can_exceed_realized_motion_in_same_axis_chains() {
+fn same_axis_chain_slack_budget_can_exceed_observed_leaf_motion() {
     let (mut session, focus, _) = chain_session();
     let root = root_rect(18, 6);
     let snap = session.solve(root, &SolverPolicy::default());

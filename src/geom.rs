@@ -6,6 +6,16 @@ pub enum Axis {
     Y,
 }
 
+impl Axis {
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::X,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Slot {
     A,

@@ -8,6 +8,13 @@ pub struct WeightPair {
     pub b: u32,
 }
 
+impl WeightPair {
+    #[must_use]
+    pub(crate) fn checked(self) -> Option<Self> {
+        (self.a != 0 || self.b != 0).then_some(self)
+    }
+}
+
 impl Default for WeightPair {
     fn default() -> Self {
         Self { a: 1, b: 1 }

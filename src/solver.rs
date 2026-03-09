@@ -8,7 +8,7 @@ use crate::{
     ids::NodeId,
     limits::{Summary, WeightPair},
     snapshot::{ScoreTuple, Snapshot, SplitTrace, Violation, ViolationKind},
-    tree::{Node, Tree},
+    tree::Tree,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,39 +206,39 @@ pub fn summarize<T>(
     if let Some(summary) = out.get(&id).copied() {
         return Ok(summary);
     }
-    let summary = match tree.node(id).ok_or(ValidationError::MissingNode(id))? {
-        Node::Leaf(leaf) => Summary {
-            min_w: leaf.meta.limits.min_w,
-            min_h: leaf.meta.limits.min_h,
-            max_w: leaf.meta.limits.max_w,
-            max_h: leaf.meta.limits.max_h,
+    let summary = if let Some(leaf) = tree.leaf(id) {
+        Summary {
+            min_w: leaf.meta().limits.min_w,
+            min_h: leaf.meta().limits.min_h,
+            max_w: leaf.meta().limits.max_w,
+            max_h: leaf.meta().limits.max_h,
             leaf_count: 1,
-            shrink_cost: u64::from(leaf.meta.priority.shrink),
-            grow_cost: u64::from(leaf.meta.priority.grow),
-        },
-        Node::Split(split) => {
-            let a = summarize(tree, split.a, out)?;
-            let b = summarize(tree, split.b, out)?;
-            match split.axis {
-                Axis::X => Summary {
-                    min_w: checked_add_u32(a.min_w, b.min_w, id, "min_w")?,
-                    min_h: a.min_h.max(b.min_h),
-                    max_w: checked_add_option_u32(a.max_w, b.max_w, id, "max_w")?,
-                    max_h: min_option(a.max_h, b.max_h),
-                    leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
-                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
-                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
-                },
-                Axis::Y => Summary {
-                    min_w: a.min_w.max(b.min_w),
-                    min_h: checked_add_u32(a.min_h, b.min_h, id, "min_h")?,
-                    max_w: min_option(a.max_w, b.max_w),
-                    max_h: checked_add_option_u32(a.max_h, b.max_h, id, "max_h")?,
-                    leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
-                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
-                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
-                },
-            }
+            shrink_cost: u64::from(leaf.meta().priority.shrink),
+            grow_cost: u64::from(leaf.meta().priority.grow),
+        }
+    } else {
+        let split = tree.split(id).ok_or(ValidationError::MissingNode(id))?;
+        let a = summarize(tree, split.a(), out)?;
+        let b = summarize(tree, split.b(), out)?;
+        match split.axis() {
+            Axis::X => Summary {
+                min_w: checked_add_u32(a.min_w, b.min_w, id, "min_w")?,
+                min_h: a.min_h.max(b.min_h),
+                max_w: checked_add_option_u32(a.max_w, b.max_w, id, "max_w")?,
+                max_h: min_option(a.max_h, b.max_h),
+                leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
+                shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
+                grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
+            },
+            Axis::Y => Summary {
+                min_w: a.min_w.max(b.min_w),
+                min_h: checked_add_u32(a.min_h, b.min_h, id, "min_h")?,
+                max_w: min_option(a.max_w, b.max_w),
+                max_h: checked_add_option_u32(a.max_h, b.max_h, id, "max_h")?,
+                leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
+                shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
+                grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
+            },
         }
     };
     out.insert(id, summary);
@@ -295,51 +295,48 @@ fn solve_node<T>(
     out: &mut Snapshot,
 ) -> Result<(), SolveError> {
     out.node_rects.insert(id, rect);
-    match tree
-        .node(id)
-        .ok_or(SolveError::Validation(ValidationError::MissingNode(id)))?
-    {
-        Node::Leaf(leaf) => {
-            record_leaf_violations(id, rect, &leaf.meta.limits, out);
-        }
-        Node::Split(split) => {
-            let sum_a = summaries
-                .get(&split.a)
-                .copied()
-                .ok_or(SolveError::Validation(ValidationError::MissingNode(
-                    split.a,
-                )))?;
-            let sum_b = summaries
-                .get(&split.b)
-                .copied()
-                .ok_or(SolveError::Validation(ValidationError::MissingNode(
-                    split.b,
-                )))?;
-            let total = rect.extent(split.axis);
-            let spec = PairSpec {
-                total,
-                min_a: sum_a.axis_limits(split.axis).0,
-                min_b: sum_b.axis_limits(split.axis).0,
-                max_a: sum_a.axis_limits(split.axis).1,
-                max_b: sum_b.axis_limits(split.axis).1,
-                wa: split.weights.a,
-                wb: split.weights.b,
-                sa: sum_a.shrink_cost,
-                sb: sum_b.shrink_cost,
-            };
-            let (chosen_a, chosen_score) = choose_extent_with_score(spec, policy);
-            let (rect_a, rect_b) = rect.split(split.axis, chosen_a);
-            out.split_traces.push(SplitTrace {
-                split: id,
-                axis: split.axis,
-                total,
-                chosen_a,
-                score: chosen_score,
-                weights: split.weights,
-            });
-            solve_node(tree, split.a, rect_a, summaries, policy, out)?;
-            solve_node(tree, split.b, rect_b, summaries, policy, out)?;
-        }
+    if let Some(leaf) = tree.leaf(id) {
+        record_leaf_violations(id, rect, &leaf.meta().limits, out);
+    } else {
+        let split = tree
+            .split(id)
+            .ok_or(SolveError::Validation(ValidationError::MissingNode(id)))?;
+        let sum_a = summaries
+            .get(&split.a())
+            .copied()
+            .ok_or(SolveError::Validation(ValidationError::MissingNode(
+                split.a(),
+            )))?;
+        let sum_b = summaries
+            .get(&split.b())
+            .copied()
+            .ok_or(SolveError::Validation(ValidationError::MissingNode(
+                split.b(),
+            )))?;
+        let total = rect.extent(split.axis());
+        let spec = PairSpec {
+            total,
+            min_a: sum_a.axis_limits(split.axis()).0,
+            min_b: sum_b.axis_limits(split.axis()).0,
+            max_a: sum_a.axis_limits(split.axis()).1,
+            max_b: sum_b.axis_limits(split.axis()).1,
+            wa: split.weights().a,
+            wb: split.weights().b,
+            sa: sum_a.shrink_cost,
+            sb: sum_b.shrink_cost,
+        };
+        let (chosen_a, chosen_score) = choose_extent_with_score(spec, policy);
+        let (rect_a, rect_b) = rect.split(split.axis(), chosen_a);
+        out.split_traces.push(SplitTrace {
+            split: id,
+            axis: split.axis(),
+            total,
+            chosen_a,
+            score: chosen_score,
+            weights: split.weights(),
+        });
+        solve_node(tree, split.a(), rect_a, summaries, policy, out)?;
+        solve_node(tree, split.b(), rect_b, summaries, policy, out)?;
     }
     Ok(())
 }

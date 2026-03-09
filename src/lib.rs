@@ -14,7 +14,8 @@ pub mod tree;
 
 pub use error::{NavError, OpError, SolveError, ValidationError};
 pub use geom::{Axis, Direction, Rect, Slot};
-pub use ids::{NodeId, Revision};
+pub type NodeId = ids::NodeId;
+pub use ids::Revision;
 pub use limits::{LeafMeta, Priority, SizeLimits, Summary, WeightPair, canonicalize_weights};
 pub use preset::{BalancedPreset, DwindlePreset, PresetKind, TallPreset, WidePreset};
 pub use resize::ResizeStrategy;
@@ -25,4 +26,6 @@ pub use solver::{
     choose_extent_with_score, score, solve, solve_strict, solve_strict_with_revision,
     solve_with_revision, summarize,
 };
-pub use tree::{LeafNode, Node, SplitNode, Tree};
+pub type LeafNode<T> = tree::LeafNode<T>;
+pub type SplitNode = tree::SplitNode;
+pub use tree::Tree;

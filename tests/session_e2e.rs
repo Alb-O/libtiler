@@ -4,9 +4,44 @@ use std::collections::BTreeSet;
 
 use common::{assert_partition, exercise_trace, leaf_ids, meta, root_rect, split_ids};
 use libtiler::{
-    Axis, BalancedPreset, Direction, LeafMeta, PresetKind, RebalanceMode, ResizeStrategy, Session,
-    Slot, SolverPolicy, TallPreset, WeightPair, WidePreset,
+    Axis, BalancedPreset, Direction, LeafMeta, NodeId, PresetKind, RebalanceMode, ResizeStrategy,
+    Session, Slot, SolverPolicy, TallPreset, WeightPair, WidePreset,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeSnapshot {
+    Leaf {
+        parent: Option<NodeId>,
+        payload: u16,
+        meta: LeafMeta,
+    },
+    Split {
+        parent: Option<NodeId>,
+        axis: Axis,
+        a: NodeId,
+        b: NodeId,
+        weights: WeightPair,
+    },
+}
+
+fn snapshot_node(tree: &libtiler::Tree<u16>, id: NodeId) -> NodeSnapshot {
+    if let Some(leaf) = tree.leaf(id) {
+        NodeSnapshot::Leaf {
+            parent: leaf.parent(),
+            payload: *leaf.payload(),
+            meta: leaf.meta().clone(),
+        }
+    } else {
+        let split = tree.split(id).expect("node should exist");
+        NodeSnapshot::Split {
+            parent: split.parent(),
+            axis: split.axis(),
+            a: split.a(),
+            b: split.b(),
+            weights: split.weights(),
+        }
+    }
+}
 
 #[test]
 fn end_to_end_structural_edit_navigation_resize_flow() {
@@ -91,12 +126,7 @@ fn split_remove_roundtrip_returns_original_layout() {
         .tree()
         .node_ids()
         .into_iter()
-        .map(|id| {
-            (
-                id,
-                session.tree().node(id).expect("node should exist").clone(),
-            )
-        })
+        .map(|id| (id, snapshot_node(session.tree(), id)))
         .collect::<Vec<_>>();
     original_nodes.sort_by_key(|(id, _)| *id);
     let original_snap = session.solve(root_rect(20, 10), &SolverPolicy::default());
@@ -113,12 +143,7 @@ fn split_remove_roundtrip_returns_original_layout() {
         .tree()
         .node_ids()
         .into_iter()
-        .map(|id| {
-            (
-                id,
-                session.tree().node(id).expect("node should exist").clone(),
-            )
-        })
+        .map(|id| (id, snapshot_node(session.tree(), id)))
         .collect::<Vec<_>>();
     roundtrip_nodes.sort_by_key(|(id, _)| *id);
     assert_eq!(session.tree().root_id(), original_root);

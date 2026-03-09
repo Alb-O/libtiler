@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use libtiler::{
-    Axis, BalancedPreset, Direction, LeafMeta, Node, NodeId, PairSpec, PresetKind, RebalanceMode,
-    Rect, ResizeStrategy, ScoreTuple, Session, ShortageMode, SizeLimits, Slot, SolverPolicy,
-    TallPreset, TieBreakMode, Tree, WidePreset,
+    Axis, BalancedPreset, Direction, LeafMeta, NodeId, PairSpec, PresetKind, RebalanceMode, Rect,
+    ResizeStrategy, ScoreTuple, Session, ShortageMode, SizeLimits, Slot, SolverPolicy, TallPreset,
+    TieBreakMode, Tree, WidePreset,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,29 +186,29 @@ pub fn eligible_splits_oracle<T>(
         .into_iter()
         .filter_map(|split_id| {
             let split = session.tree().split(split_id)?;
-            let a_rect = snap.rect(split.a)?;
-            let b_rect = snap.rect(split.b)?;
-            let focus_in_a = session.tree().contains_in_subtree(split.a, focus);
+            let a_rect = snap.rect(split.a())?;
+            let b_rect = snap.rect(split.b())?;
+            let focus_in_a = session.tree().contains_in_subtree(split.a(), focus);
             let eligible = match dir {
                 Direction::Right => {
-                    split.axis == Axis::X && focus_in_a && focus_rect.right() == a_rect.right()
+                    split.axis() == Axis::X && focus_in_a && focus_rect.right() == a_rect.right()
                 }
                 Direction::Left => {
-                    split.axis == Axis::X && !focus_in_a && focus_rect.left() == b_rect.left()
+                    split.axis() == Axis::X && !focus_in_a && focus_rect.left() == b_rect.left()
                 }
                 Direction::Down => {
-                    split.axis == Axis::Y && focus_in_a && focus_rect.bottom() == a_rect.bottom()
+                    split.axis() == Axis::Y && focus_in_a && focus_rect.bottom() == a_rect.bottom()
                 }
                 Direction::Up => {
-                    split.axis == Axis::Y && !focus_in_a && focus_rect.top() == b_rect.top()
+                    split.axis() == Axis::Y && !focus_in_a && focus_rect.top() == b_rect.top()
                 }
             };
             eligible.then(|| {
-                let total = a_rect.extent(split.axis) + b_rect.extent(split.axis);
-                let sum_a = summaries[&split.a];
-                let sum_b = summaries[&split.b];
-                let (min_a, max_a) = sum_a.axis_limits(split.axis);
-                let (min_b, max_b) = sum_b.axis_limits(split.axis);
+                let total = a_rect.extent(split.axis()) + b_rect.extent(split.axis());
+                let sum_a = summaries[&split.a()];
+                let sum_b = summaries[&split.b()];
+                let (min_a, max_a) = sum_a.axis_limits(split.axis());
+                let (min_b, max_b) = sum_b.axis_limits(split.axis());
                 let min_a = u32::try_from(min_a).expect("test bounds should fit u32");
                 let min_b = u32::try_from(min_b).expect("test bounds should fit u32");
                 let max_a =
@@ -218,7 +218,7 @@ pub fn eligible_splits_oracle<T>(
                 RefEligibleSplit {
                     split: split_id,
                     total,
-                    current_a: a_rect.extent(split.axis),
+                    current_a: a_rect.extent(split.axis()),
                     lo: min_a.max(max_b.map_or(0, |value| total.saturating_sub(value))),
                     hi: total.saturating_sub(min_b).min(max_a.unwrap_or(total)),
                 }
@@ -260,43 +260,43 @@ fn solve_reference_node<T>(
     out: &mut libtiler::Snapshot,
 ) {
     out.node_rects.insert(id, rect);
-    match tree.node(id).expect("missing node") {
-        Node::Leaf(leaf) => record_leaf_violations(id, rect, &leaf.meta.limits, out),
-        Node::Split(split) => {
-            let sum_a = summaries[&split.a];
-            let sum_b = summaries[&split.b];
-            let spec = PairSpec {
-                total: rect.extent(split.axis),
-                min_a: u32::try_from(sum_a.axis_limits(split.axis).0)
-                    .expect("test bounds should fit u32"),
-                min_b: u32::try_from(sum_b.axis_limits(split.axis).0)
-                    .expect("test bounds should fit u32"),
-                max_a: sum_a
-                    .axis_limits(split.axis)
-                    .1
-                    .map(|value| u32::try_from(value).expect("test bounds should fit u32")),
-                max_b: sum_b
-                    .axis_limits(split.axis)
-                    .1
-                    .map(|value| u32::try_from(value).expect("test bounds should fit u32")),
-                wa: split.weights.a,
-                wb: split.weights.b,
-                sa: sum_a.shrink_cost,
-                sb: sum_b.shrink_cost,
-            };
-            let (chosen_a, score) = choose_extent_oracle(spec, policy);
-            let (rect_a, rect_b) = rect.split(split.axis, chosen_a);
-            out.split_traces.push(libtiler::SplitTrace {
-                split: id,
-                axis: split.axis,
-                total: spec.total,
-                chosen_a,
-                score,
-                weights: split.weights,
-            });
-            solve_reference_node(tree, split.a, rect_a, summaries, policy, out);
-            solve_reference_node(tree, split.b, rect_b, summaries, policy, out);
-        }
+    if let Some(leaf) = tree.leaf(id) {
+        record_leaf_violations(id, rect, &leaf.meta().limits, out);
+    } else {
+        let split = tree.split(id).expect("missing node");
+        let sum_a = summaries[&split.a()];
+        let sum_b = summaries[&split.b()];
+        let spec = PairSpec {
+            total: rect.extent(split.axis()),
+            min_a: u32::try_from(sum_a.axis_limits(split.axis()).0)
+                .expect("test bounds should fit u32"),
+            min_b: u32::try_from(sum_b.axis_limits(split.axis()).0)
+                .expect("test bounds should fit u32"),
+            max_a: sum_a
+                .axis_limits(split.axis())
+                .1
+                .map(|value| u32::try_from(value).expect("test bounds should fit u32")),
+            max_b: sum_b
+                .axis_limits(split.axis())
+                .1
+                .map(|value| u32::try_from(value).expect("test bounds should fit u32")),
+            wa: split.weights().a,
+            wb: split.weights().b,
+            sa: sum_a.shrink_cost,
+            sb: sum_b.shrink_cost,
+        };
+        let (chosen_a, score) = choose_extent_oracle(spec, policy);
+        let (rect_a, rect_b) = rect.split(split.axis(), chosen_a);
+        out.split_traces.push(libtiler::SplitTrace {
+            split: id,
+            axis: split.axis(),
+            total: spec.total,
+            chosen_a,
+            score,
+            weights: split.weights(),
+        });
+        solve_reference_node(tree, split.a(), rect_a, summaries, policy, out);
+        solve_reference_node(tree, split.b(), rect_b, summaries, policy, out);
     }
 }
 
@@ -308,39 +308,39 @@ fn summarize_reference<T>(
     if let Some(summary) = out.get(&id).copied() {
         return summary;
     }
-    let summary = match tree.node(id).expect("missing node in reference summary") {
-        Node::Leaf(leaf) => RefSummary {
-            min_w: u64::from(leaf.meta.limits.min_w),
-            min_h: u64::from(leaf.meta.limits.min_h),
-            max_w: leaf.meta.limits.max_w.map(u64::from),
-            max_h: leaf.meta.limits.max_h.map(u64::from),
+    let summary = if let Some(leaf) = tree.leaf(id) {
+        RefSummary {
+            min_w: u64::from(leaf.meta().limits.min_w),
+            min_h: u64::from(leaf.meta().limits.min_h),
+            max_w: leaf.meta().limits.max_w.map(u64::from),
+            max_h: leaf.meta().limits.max_h.map(u64::from),
             leaf_count: 1,
-            shrink_cost: u64::from(leaf.meta.priority.shrink),
-            grow_cost: u64::from(leaf.meta.priority.grow),
-        },
-        Node::Split(split) => {
-            let a = summarize_reference(tree, split.a, out);
-            let b = summarize_reference(tree, split.b, out);
-            match split.axis {
-                Axis::X => RefSummary {
-                    min_w: checked_add_u64(a.min_w, b.min_w, "min_w"),
-                    min_h: a.min_h.max(b.min_h),
-                    max_w: checked_add_option_u64(a.max_w, b.max_w, "max_w"),
-                    max_h: min_option_u64(a.max_h, b.max_h),
-                    leaf_count: checked_add_u64(a.leaf_count, b.leaf_count, "leaf_count"),
-                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, "shrink_cost"),
-                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, "grow_cost"),
-                },
-                Axis::Y => RefSummary {
-                    min_w: a.min_w.max(b.min_w),
-                    min_h: checked_add_u64(a.min_h, b.min_h, "min_h"),
-                    max_w: min_option_u64(a.max_w, b.max_w),
-                    max_h: checked_add_option_u64(a.max_h, b.max_h, "max_h"),
-                    leaf_count: checked_add_u64(a.leaf_count, b.leaf_count, "leaf_count"),
-                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, "shrink_cost"),
-                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, "grow_cost"),
-                },
-            }
+            shrink_cost: u64::from(leaf.meta().priority.shrink),
+            grow_cost: u64::from(leaf.meta().priority.grow),
+        }
+    } else {
+        let split = tree.split(id).expect("missing node in reference summary");
+        let a = summarize_reference(tree, split.a(), out);
+        let b = summarize_reference(tree, split.b(), out);
+        match split.axis() {
+            Axis::X => RefSummary {
+                min_w: checked_add_u64(a.min_w, b.min_w, "min_w"),
+                min_h: a.min_h.max(b.min_h),
+                max_w: checked_add_option_u64(a.max_w, b.max_w, "max_w"),
+                max_h: min_option_u64(a.max_h, b.max_h),
+                leaf_count: checked_add_u64(a.leaf_count, b.leaf_count, "leaf_count"),
+                shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, "shrink_cost"),
+                grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, "grow_cost"),
+            },
+            Axis::Y => RefSummary {
+                min_w: a.min_w.max(b.min_w),
+                min_h: checked_add_u64(a.min_h, b.min_h, "min_h"),
+                max_w: min_option_u64(a.max_w, b.max_w),
+                max_h: checked_add_option_u64(a.max_h, b.max_h, "max_h"),
+                leaf_count: checked_add_u64(a.leaf_count, b.leaf_count, "leaf_count"),
+                shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, "shrink_cost"),
+                grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, "grow_cost"),
+            },
         }
     };
     out.insert(id, summary);

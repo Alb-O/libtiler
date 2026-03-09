@@ -127,41 +127,45 @@ pub(crate) fn eligible_splits<T>(
     let mut out = Vec::new();
     for split_id in tree.ancestors_nearest_first(focus) {
         let split = tree.split(split_id).ok_or(OpError::NotSplit(split_id))?;
-        let a_rect = snap.rect(split.a).ok_or(OpError::MissingNode(split.a))?;
-        let b_rect = snap.rect(split.b).ok_or(OpError::MissingNode(split.b))?;
-        let focus_in_a = tree.contains_in_subtree(split.a, focus);
+        let a_rect = snap
+            .rect(split.a())
+            .ok_or(OpError::MissingNode(split.a()))?;
+        let b_rect = snap
+            .rect(split.b())
+            .ok_or(OpError::MissingNode(split.b()))?;
+        let focus_in_a = tree.contains_in_subtree(split.a(), focus);
         let eligible = match dir {
             Direction::Right => {
-                split.axis == Axis::X && focus_in_a && focus_rect.right() == a_rect.right()
+                split.axis() == Axis::X && focus_in_a && focus_rect.right() == a_rect.right()
             }
             Direction::Left => {
-                split.axis == Axis::X && !focus_in_a && focus_rect.left() == b_rect.left()
+                split.axis() == Axis::X && !focus_in_a && focus_rect.left() == b_rect.left()
             }
             Direction::Down => {
-                split.axis == Axis::Y && focus_in_a && focus_rect.bottom() == a_rect.bottom()
+                split.axis() == Axis::Y && focus_in_a && focus_rect.bottom() == a_rect.bottom()
             }
             Direction::Up => {
-                split.axis == Axis::Y && !focus_in_a && focus_rect.top() == b_rect.top()
+                split.axis() == Axis::Y && !focus_in_a && focus_rect.top() == b_rect.top()
             }
         };
         if !eligible {
             continue;
         }
-        let total = a_rect.extent(split.axis) + b_rect.extent(split.axis);
+        let total = a_rect.extent(split.axis()) + b_rect.extent(split.axis());
         let sum_a = summaries
-            .get(&split.a)
+            .get(&split.a())
             .copied()
-            .ok_or(OpError::MissingNode(split.a))?;
+            .ok_or(OpError::MissingNode(split.a()))?;
         let sum_b = summaries
-            .get(&split.b)
+            .get(&split.b())
             .copied()
-            .ok_or(OpError::MissingNode(split.b))?;
-        let (min_a, max_a) = sum_a.axis_limits(split.axis);
-        let (min_b, max_b) = sum_b.axis_limits(split.axis);
+            .ok_or(OpError::MissingNode(split.b()))?;
+        let (min_a, max_a) = sum_a.axis_limits(split.axis());
+        let (min_b, max_b) = sum_b.axis_limits(split.axis());
         out.push(EligibleSplit {
             split: split_id,
             total,
-            current_a: a_rect.extent(split.axis),
+            current_a: a_rect.extent(split.axis()),
             lo: min_a.max(max_b.map_or(0, |max_b| total.saturating_sub(max_b))),
             hi: total.saturating_sub(min_b).min(max_a.unwrap_or(total)),
         });

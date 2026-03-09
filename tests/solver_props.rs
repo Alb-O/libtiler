@@ -7,20 +7,39 @@ use common::{
     stressed_policy,
 };
 use libtiler::{
-    Axis, LeafMeta, PairSpec, Session, Slot, SolveError, SolverPolicy, Tree, ValidationError,
-    WeightPair, choose_extent_with_score, solve, summarize,
+    Axis, LeafMeta, PairSpec, Session, Slot, SolveError, SolverPolicy, ValidationError, WeightPair,
+    choose_extent_with_score, solve, summarize,
 };
 use proptest::prelude::*;
 
-fn two_leaf_tree(left: LeafMeta, right: LeafMeta) -> Tree<u8> {
-    let mut tree = Tree::new();
-    let a = tree.new_leaf(1, left);
-    let b = tree.new_leaf(2, right);
-    let split = tree.new_split(Axis::X, a, b, WeightPair::default());
-    tree.set_root(Some(split));
-    tree.set_parent(a, Some(split));
-    tree.set_parent(b, Some(split));
-    tree
+fn two_leaf_tree(left: LeafMeta, right: LeafMeta) -> libtiler::Tree<u8> {
+    let mut session = Session::new();
+    let _ = session.insert_root(1, left).expect("insert root");
+    let _ = session
+        .split_focus(Axis::X, Slot::B, 2, right, None)
+        .expect("split root");
+    session.tree().clone()
+}
+
+#[test]
+fn tree_enumeration_is_sorted() {
+    let mut session = Session::new();
+    let _ = session
+        .insert_root(1_u8, LeafMeta::default())
+        .expect("insert root");
+    let _ = session
+        .split_focus(Axis::X, Slot::B, 2_u8, LeafMeta::default(), None)
+        .expect("split root");
+    let _ = session
+        .split_focus(Axis::Y, Slot::B, 3_u8, LeafMeta::default(), None)
+        .expect("split focus");
+    let tree = session.tree();
+
+    let ids = tree.node_ids();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]));
+
+    let split_ids = tree.split_ids();
+    assert!(split_ids.windows(2).all(|w| w[0] < w[1]));
 }
 
 proptest! {
