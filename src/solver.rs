@@ -141,7 +141,11 @@ fn pref_penalty(total: u32, a: u32, wa: u32, wb: u32) -> u128 {
     left.abs_diff(right)
 }
 
-pub fn solve<T>(
+pub fn solve<T>(tree: &Tree<T>, root: Rect, policy: &SolverPolicy) -> Result<Snapshot, SolveError> {
+    solve_with_revision(tree, root, 0, policy)
+}
+
+pub fn solve_with_revision<T>(
     tree: &Tree<T>,
     root: Rect,
     revision: u64,
@@ -169,10 +173,23 @@ pub fn solve<T>(
 pub fn solve_strict<T>(
     tree: &Tree<T>,
     root: Rect,
+    policy: &SolverPolicy,
+) -> Result<Snapshot, SolveError> {
+    let snapshot = solve(tree, root, policy)?;
+    if snapshot.strict_feasible {
+        Ok(snapshot)
+    } else {
+        Err(SolveError::Infeasible)
+    }
+}
+
+pub fn solve_strict_with_revision<T>(
+    tree: &Tree<T>,
+    root: Rect,
     revision: u64,
     policy: &SolverPolicy,
 ) -> Result<Snapshot, SolveError> {
-    let snapshot = solve(tree, root, revision, policy)?;
+    let snapshot = solve_with_revision(tree, root, revision, policy)?;
     if snapshot.strict_feasible {
         Ok(snapshot)
     } else {

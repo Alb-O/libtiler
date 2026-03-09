@@ -22,6 +22,7 @@ pub use session::{RebalanceMode, Session};
 pub use snapshot::{ScoreTuple, Snapshot, SplitTrace, Violation, ViolationKind};
 pub use solver::{
     OverflowMode, PairSpec, ShortageMode, SolverPolicy, TieBreakMode, choose_extent,
-    choose_extent_with_score, score, solve, solve_strict, summarize,
+    choose_extent_with_score, score, solve, solve_strict, solve_strict_with_revision,
+    solve_with_revision, summarize,
 };
 pub use tree::{LeafNode, Node, SplitNode, Tree};

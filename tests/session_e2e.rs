@@ -214,3 +214,28 @@ fn resize_clamps_to_strict_slack() {
     assert_eq!(after_rect.w, 7);
     assert_eq!(after_rect.w - before.w, 2);
 }
+
+#[test]
+fn move_selection_supports_ancestor_targets() {
+    let mut session = Session::new();
+    let _a = session
+        .insert_root(1_u16, LeafMeta::default())
+        .expect("insert root");
+    let b = session
+        .split_focus(Axis::X, Slot::B, 2_u16, LeafMeta::default(), None)
+        .expect("split x");
+    session.focus = Some(b);
+    session.selection = Some(b);
+    let _c = session
+        .split_focus(Axis::Y, Slot::B, 3_u16, LeafMeta::default(), None)
+        .expect("split y");
+
+    let ancestor_target = session.tree.root.expect("root should exist");
+    let selected = session.selection.expect("selection should exist");
+    session
+        .move_selection_as_sibling_of(ancestor_target, Axis::X, Slot::B)
+        .expect("move next to ancestor target");
+
+    assert!(session.tree.contains(selected));
+    assert!(session.validate().is_ok());
+}

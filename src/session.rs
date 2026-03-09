@@ -84,7 +84,7 @@ impl<T> Session<T> {
 
     #[must_use]
     pub fn solve(&self, root: Rect, policy: &SolverPolicy) -> Snapshot {
-        crate::solver::solve(&self.tree, root, self.revision, policy)
+        crate::solver::solve_with_revision(&self.tree, root, self.revision, policy)
             .expect("session should maintain a valid tree")
     }
 
@@ -229,15 +229,18 @@ impl<T> Session<T> {
         if self.tree.contains_in_subtree(selection, target) {
             return Err(OpError::TargetInsideSelection);
         }
-        if self.tree.contains_in_subtree(target, selection) {
-            return Err(OpError::AncestorConflict);
-        }
         let focus = self.focus_leaf()?;
         let old_selection = self.selection;
+        let effective_target = remaining_subtree_after_detach(&self.tree, target, selection)
+            .ok_or(OpError::AncestorConflict)?;
         self.tree.detach_subtree(selection);
-        let split_id =
-            self.tree
-                .attach_as_sibling(target, selection, axis, slot, WeightPair::default());
+        let split_id = self.tree.attach_as_sibling(
+            effective_target,
+            selection,
+            axis,
+            slot,
+            WeightPair::default(),
+        );
         self.repair_after_mutation(focus, old_selection, Some(split_id));
         self.bump_revision();
         self.validate().map_err(OpError::Validation)?;
@@ -991,6 +994,27 @@ fn checked_weights(weights: WeightPair) -> Result<WeightPair, OpError> {
         Err(OpError::InvalidWeights)
     } else {
         Ok(weights)
+    }
+}
+
+fn remaining_subtree_after_detach<T>(
+    tree: &Tree<T>,
+    current: NodeId,
+    removed: NodeId,
+) -> Option<NodeId> {
+    if current == removed {
+        return None;
+    }
+    match tree.nodes.get(&current)? {
+        Node::Leaf(_) => Some(current),
+        Node::Split(split) => match (
+            remaining_subtree_after_detach(tree, split.a, removed),
+            remaining_subtree_after_detach(tree, split.b, removed),
+        ) {
+            (Some(_), Some(_)) => Some(current),
+            (Some(id), None) | (None, Some(id)) => Some(id),
+            (None, None) => None,
+        },
     }
 }
 

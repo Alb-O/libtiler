@@ -77,9 +77,7 @@ fn summary_matches_bruteforce_feasibility_envelope() {
 
     let strict_pairs = (0_u32..=20)
         .flat_map(|w| (0_u32..=20).map(move |h| (w, h)))
-        .filter(|(w, h)| {
-            solve_strict(&session.tree, root_rect(*w, *h), session.revision, &policy).is_ok()
-        })
+        .filter(|(w, h)| solve_strict(&session.tree, root_rect(*w, *h), &policy).is_ok())
         .collect::<Vec<_>>();
 
     let min_w = strict_pairs
