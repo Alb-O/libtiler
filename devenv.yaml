@@ -21,24 +21,24 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
-  materializer:
-    url: github:Alb-O/materializer
+  dvnv-instructions-composer:
+    url: github:Alb-O/dvnv-instructions-composer
     flake: false
   committer:
     url: github:Alb-O/committer
     flake: false
-  env-rust:
-    url: github:Alb-O/env-rust
+  dvnv-rust-env:
+    url: github:Alb-O/dvnv-rust-env
     flake: false
-  env-docs:
-    url: github:Alb-O/env-docs
+  dvnv-docs-env:
+    url: github:Alb-O/dvnv-docs-env
     flake: false
-  env-local-overrides:
-    url: github:Alb-O/env-local-overrides
+  dvnv-local-inputs:
+    url: github:Alb-O/dvnv-local-inputs
     flake: false
 imports:
-  - materializer
+  - dvnv-instructions-composer
   - committer
-  - env-rust
-  - env-docs
-  - env-local-overrides
+  - dvnv-rust-env
+  - dvnv-docs-env
+  - dvnv-local-inputs
