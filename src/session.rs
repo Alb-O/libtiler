@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::{NavError, OpError, ValidationError},
+    error::{NavError, OpError, SolveError, ValidationError},
     geom::{Axis, Direction, Rect, Slot},
     ids::{NodeId, Revision},
-    limits::{LeafMeta, Summary, WeightPair, canonicalize_weights},
+    limits::{LeafMeta, WeightPair, canonicalize_weights},
     nav::best_neighbor,
-    preset::{BalancedPreset, PresetKind, TallPreset, WidePreset},
-    resize::ResizeStrategy,
+    preset::{PresetKind, build_preset_subtree, subtree_matches_preset},
+    resize::{ResizeStrategy, distribute_resize, eligible_splits, resize_sign},
     snapshot::Snapshot,
     solver::{SolverPolicy, summarize},
     tree::{Node, SplitNode, Tree},
@@ -23,10 +23,10 @@ pub enum RebalanceMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session<T> {
-    pub tree: Tree<T>,
-    pub focus: Option<NodeId>,
-    pub selection: Option<NodeId>,
-    pub revision: Revision,
+    tree: Tree<T>,
+    focus: Option<NodeId>,
+    selection: Option<NodeId>,
+    revision: Revision,
 }
 
 impl<T> Default for Session<T> {
@@ -48,7 +48,7 @@ impl<T> Session<T> {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.tree.validate()?;
-        match self.tree.root {
+        match self.tree.root_id() {
             None => {
                 if self.focus.is_none() && self.selection.is_none() {
                     Ok(())
@@ -84,16 +84,76 @@ impl<T> Session<T> {
 
     #[must_use]
     pub fn solve(&self, root: Rect, policy: &SolverPolicy) -> Snapshot {
+        self.try_solve(root, policy)
+            .expect("session should maintain a valid and representable tree")
+    }
+
+    pub fn try_solve(&self, root: Rect, policy: &SolverPolicy) -> Result<Snapshot, SolveError> {
         crate::solver::solve_with_revision(&self.tree, root, self.revision, policy)
-            .expect("session should maintain a valid tree")
+    }
+
+    #[must_use]
+    pub fn tree(&self) -> &Tree<T> {
+        &self.tree
+    }
+
+    #[must_use]
+    pub fn focus(&self) -> Option<NodeId> {
+        self.focus
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> Option<NodeId> {
+        self.selection
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    pub fn set_focus_leaf(&mut self, id: NodeId) -> Result<(), OpError> {
+        let old_focus = self.focus;
+        let old_selection = self.selection;
+        self.require_leaf(id)?;
+        self.focus = Some(id);
+        self.repair_selection_for_current_focus();
+        self.validate()
+            .map_err(OpError::Validation)
+            .inspect_err(|_| {
+                self.focus = old_focus;
+                self.selection = old_selection;
+            })
+    }
+
+    pub fn set_selection(&mut self, id: NodeId) -> Result<(), OpError> {
+        let old_focus = self.focus;
+        let old_selection = self.selection;
+        self.require_node(id)?;
+        if self.tree.is_leaf(id) {
+            self.focus = Some(id);
+            self.selection = Some(id);
+        } else {
+            let focus = self.require_focus_leaf()?;
+            if !self.tree.contains_in_subtree(id, focus) {
+                return Err(OpError::Validation(ValidationError::InvalidSelection(id)));
+            }
+            self.selection = Some(id);
+        }
+        self.validate()
+            .map_err(OpError::Validation)
+            .inspect_err(|_| {
+                self.focus = old_focus;
+                self.selection = old_selection;
+            })
     }
 
     pub fn insert_root(&mut self, payload: T, meta: LeafMeta) -> Result<NodeId, OpError> {
-        if self.tree.root.is_some() {
+        if self.tree.root_id().is_some() {
             return Err(OpError::NonEmpty);
         }
         let id = self.tree.new_leaf(payload, meta);
-        self.tree.root = Some(id);
+        self.tree.set_root(Some(id));
         self.focus = Some(id);
         self.selection = Some(id);
         self.bump_revision();
@@ -109,7 +169,7 @@ impl<T> Session<T> {
         meta: LeafMeta,
         weights: Option<WeightPair>,
     ) -> Result<NodeId, OpError> {
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let weights = checked_weights(weights.unwrap_or_default())?;
         let old_selection = self.selection;
         let new_leaf = self.tree.new_leaf(payload, meta);
@@ -129,7 +189,7 @@ impl<T> Session<T> {
         weights: Option<WeightPair>,
     ) -> Result<NodeId, OpError> {
         let selection = self.selection.ok_or(OpError::Empty)?;
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let old_selection = self.selection;
         let new_leaf = self.tree.new_leaf(payload, meta);
         let split_id = self.wrap_existing_with_leaf(
@@ -146,10 +206,10 @@ impl<T> Session<T> {
     }
 
     pub fn remove_focus(&mut self) -> Result<(), OpError> {
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let old_selection = self.selection;
-        let fallback = if self.tree.root == Some(focus) {
-            self.tree.root = None;
+        let fallback = if self.tree.root_id() == Some(focus) {
+            self.tree.set_root(None);
             None
         } else {
             let sibling = self
@@ -159,7 +219,7 @@ impl<T> Session<T> {
             let replacement = self.tree.collapse_unary_parent(focus).unwrap_or(sibling);
             Some(replacement)
         };
-        self.tree.nodes.remove(&focus);
+        self.tree.remove_node(focus);
         self.repair_after_mutation(focus, old_selection, fallback);
         self.bump_revision();
         self.validate().map_err(OpError::Validation)?;
@@ -175,7 +235,7 @@ impl<T> Session<T> {
         if self.tree.contains_in_subtree(a, b) || self.tree.contains_in_subtree(b, a) {
             return Err(OpError::AncestorConflict);
         }
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let old_selection = self.selection;
         let parent_a = self.tree.parent_of(a);
         let parent_b = self.tree.parent_of(b);
@@ -195,21 +255,21 @@ impl<T> Session<T> {
             match parent_a {
                 Some(parent) => self.tree.replace_child(parent, a, b),
                 None => {
-                    self.tree.root = Some(b);
+                    self.tree.set_root(Some(b));
                     self.tree.set_parent(b, None);
                 }
             }
             match parent_b {
                 Some(parent) => self.tree.replace_child(parent, b, a),
                 None => {
-                    self.tree.root = Some(a);
+                    self.tree.set_root(Some(a));
                     self.tree.set_parent(a, None);
                 }
             }
             self.tree.set_parent(a, parent_b);
             self.tree.set_parent(b, parent_a);
         }
-        self.repair_after_mutation(focus, old_selection, self.tree.root);
+        self.repair_after_mutation(focus, old_selection, self.tree.root_id());
         self.bump_revision();
         self.validate().map_err(OpError::Validation)?;
         Ok(())
@@ -229,7 +289,7 @@ impl<T> Session<T> {
         if self.tree.contains_in_subtree(selection, target) {
             return Err(OpError::TargetInsideSelection);
         }
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let old_selection = self.selection;
         let effective_target = remaining_subtree_after_detach(&self.tree, target, selection)
             .ok_or(OpError::AncestorConflict)?;
@@ -316,10 +376,10 @@ impl<T> Session<T> {
         if self.tree.is_leaf(selection) {
             return Ok(());
         }
-        if self.subtree_matches_preset(selection, preset)? {
+        if subtree_matches_preset(&self.tree, selection, preset)? {
             return Ok(());
         }
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let old_selection = self.selection;
         let parent = self.tree.parent_of(selection);
         let leaves = self.tree.leaf_ids_dfs(selection);
@@ -328,16 +388,16 @@ impl<T> Session<T> {
             self.tree.set_parent(*leaf, None);
         }
         for split in split_ids {
-            self.tree.nodes.remove(&split);
+            self.tree.remove_node(split);
         }
-        let rebuilt = self.build_preset_subtree(&leaves, preset)?;
+        let rebuilt = build_preset_subtree(&mut self.tree, &leaves, preset)?;
         match parent {
             Some(parent) => {
                 self.tree.replace_child(parent, selection, rebuilt);
                 self.tree.set_parent(rebuilt, Some(parent));
             }
             None => {
-                self.tree.root = Some(rebuilt);
+                self.tree.set_root(Some(rebuilt));
                 self.tree.set_parent(rebuilt, None);
             }
         }
@@ -358,12 +418,12 @@ impl<T> Session<T> {
             return Ok(());
         }
         self.ensure_fresh_snapshot(snap)?;
-        let focus = self.focus_leaf()?;
+        let focus = self.require_focus_leaf()?;
         let mut summaries = HashMap::new();
-        if let Some(root) = self.tree.root {
+        if let Some(root) = self.tree.root_id() {
             summarize(&self.tree, root, &mut summaries).map_err(OpError::Validation)?;
         }
-        let eligible = self.eligible_splits(focus, dir, snap, &summaries)?;
+        let eligible = eligible_splits(&self.tree, focus, dir, snap, &summaries)?;
         if eligible.is_empty() {
             return Ok(());
         }
@@ -392,7 +452,7 @@ impl<T> Session<T> {
 
     fn leaf_rects_from_snapshot(&self, snap: &Snapshot) -> Result<HashMap<NodeId, Rect>, NavError> {
         self.tree
-            .root
+            .root_id()
             .map(|root| self.tree.leaf_ids_dfs(root))
             .unwrap_or_default()
             .into_iter()
@@ -402,330 +462,6 @@ impl<T> Session<T> {
                     .ok_or(NavError::MissingSnapshotRect(id))
             })
             .collect()
-    }
-
-    fn eligible_splits(
-        &self,
-        focus: NodeId,
-        dir: Direction,
-        snap: &Snapshot,
-        summaries: &HashMap<NodeId, Summary>,
-    ) -> Result<Vec<EligibleSplit>, OpError> {
-        let focus_rect = snap.rect(focus).ok_or(OpError::MissingNode(focus))?;
-        let mut out = Vec::new();
-        for split_id in self.tree.ancestors_nearest_first(focus) {
-            let split = self
-                .tree
-                .nodes
-                .get(&split_id)
-                .and_then(Node::as_split)
-                .ok_or(OpError::NotSplit(split_id))?;
-            let a_rect = snap.rect(split.a).ok_or(OpError::MissingNode(split.a))?;
-            let b_rect = snap.rect(split.b).ok_or(OpError::MissingNode(split.b))?;
-            let focus_in_a = self.tree.contains_in_subtree(split.a, focus);
-            let eligible = match dir {
-                Direction::Right => {
-                    split.axis == Axis::X && focus_in_a && focus_rect.right() == a_rect.right()
-                }
-                Direction::Left => {
-                    split.axis == Axis::X && !focus_in_a && focus_rect.left() == b_rect.left()
-                }
-                Direction::Down => {
-                    split.axis == Axis::Y && focus_in_a && focus_rect.bottom() == a_rect.bottom()
-                }
-                Direction::Up => {
-                    split.axis == Axis::Y && !focus_in_a && focus_rect.top() == b_rect.top()
-                }
-            };
-            if !eligible {
-                continue;
-            }
-            let total = a_rect.extent(split.axis) + b_rect.extent(split.axis);
-            let sum_a = summaries
-                .get(&split.a)
-                .copied()
-                .ok_or(OpError::MissingNode(split.a))?;
-            let sum_b = summaries
-                .get(&split.b)
-                .copied()
-                .ok_or(OpError::MissingNode(split.b))?;
-            let (min_a, max_a) = sum_a.axis_limits(split.axis);
-            let (min_b, max_b) = sum_b.axis_limits(split.axis);
-            let lo = min_a.max(max_b.map_or(0, |max_b| total.saturating_sub(max_b)));
-            let hi = total.saturating_sub(min_b).min(max_a.unwrap_or(total));
-            let current_a = a_rect.extent(split.axis);
-            out.push(EligibleSplit {
-                split: split_id,
-                total,
-                current_a,
-                lo,
-                hi,
-            });
-        }
-        Ok(out)
-    }
-
-    fn build_preset_subtree(
-        &mut self,
-        leaves: &[NodeId],
-        preset: PresetKind,
-    ) -> Result<NodeId, OpError> {
-        match preset {
-            PresetKind::Balanced(preset) => self.build_balanced(leaves, preset),
-            PresetKind::Dwindle(preset) => {
-                self.build_dwindle(leaves, preset.start_axis, preset.new_leaf_slot)
-            }
-            PresetKind::Tall(preset) => self.build_tall(leaves, preset),
-            PresetKind::Wide(preset) => self.build_wide(leaves, preset),
-        }
-    }
-
-    fn subtree_matches_preset(&self, root: NodeId, preset: PresetKind) -> Result<bool, OpError> {
-        let leaves = self.tree.leaf_ids_dfs(root);
-        match preset {
-            PresetKind::Balanced(preset) => Ok(self.matches_balanced(root, &leaves, preset)),
-            PresetKind::Dwindle(preset) => {
-                Ok(self.matches_dwindle(root, &leaves, preset.start_axis, preset.new_leaf_slot))
-            }
-            PresetKind::Tall(preset) => Ok(self.matches_tall(root, &leaves, preset)),
-            PresetKind::Wide(preset) => Ok(self.matches_wide(root, &leaves, preset)),
-        }
-    }
-
-    fn build_balanced(
-        &mut self,
-        leaves: &[NodeId],
-        preset: BalancedPreset,
-    ) -> Result<NodeId, OpError> {
-        if leaves.is_empty() {
-            return Err(OpError::Empty);
-        }
-        if leaves.len() == 1 {
-            return Ok(leaves[0]);
-        }
-        let mid = leaves.len().div_ceil(2);
-        let next_axis = if preset.alternate {
-            toggle_axis(preset.start_axis)
-        } else {
-            preset.start_axis
-        };
-        let a = self.build_balanced(
-            &leaves[..mid],
-            BalancedPreset {
-                start_axis: next_axis,
-                alternate: preset.alternate,
-            },
-        )?;
-        let b = self.build_balanced(
-            &leaves[mid..],
-            BalancedPreset {
-                start_axis: next_axis,
-                alternate: preset.alternate,
-            },
-        )?;
-        Ok(self.new_internal_split(
-            preset.start_axis,
-            a,
-            b,
-            canonicalize_weights(mid as u32, (leaves.len() - mid) as u32),
-        ))
-    }
-
-    fn build_dwindle(
-        &mut self,
-        leaves: &[NodeId],
-        axis: Axis,
-        slot: Slot,
-    ) -> Result<NodeId, OpError> {
-        if leaves.is_empty() {
-            return Err(OpError::Empty);
-        }
-        if leaves.len() == 1 {
-            return Ok(leaves[0]);
-        }
-        let first = leaves[0];
-        let rest = self.build_dwindle(&leaves[1..], toggle_axis(axis), slot)?;
-        let (a, b) = match slot {
-            Slot::A => (rest, first),
-            Slot::B => (first, rest),
-        };
-        Ok(self.new_internal_split(axis, a, b, WeightPair::default()))
-    }
-
-    fn build_tall(&mut self, leaves: &[NodeId], preset: TallPreset) -> Result<NodeId, OpError> {
-        if leaves.is_empty() {
-            return Err(OpError::Empty);
-        }
-        if leaves.len() == 1 {
-            return Ok(leaves[0]);
-        }
-        let master = leaves[0];
-        let stack = self.build_equal_linear(&leaves[1..], Axis::Y)?;
-        let (a, b) = match preset.master_slot {
-            Slot::A => (master, stack),
-            Slot::B => (stack, master),
-        };
-        Ok(self.new_internal_split(Axis::X, a, b, checked_weights(preset.root_weights)?))
-    }
-
-    fn build_wide(&mut self, leaves: &[NodeId], preset: WidePreset) -> Result<NodeId, OpError> {
-        if leaves.is_empty() {
-            return Err(OpError::Empty);
-        }
-        if leaves.len() == 1 {
-            return Ok(leaves[0]);
-        }
-        let master = leaves[0];
-        let stack = self.build_equal_linear(&leaves[1..], Axis::X)?;
-        let (a, b) = match preset.master_slot {
-            Slot::A => (master, stack),
-            Slot::B => (stack, master),
-        };
-        Ok(self.new_internal_split(Axis::Y, a, b, checked_weights(preset.root_weights)?))
-    }
-
-    fn build_equal_linear(&mut self, leaves: &[NodeId], axis: Axis) -> Result<NodeId, OpError> {
-        if leaves.is_empty() {
-            return Err(OpError::Empty);
-        }
-        if leaves.len() == 1 {
-            return Ok(leaves[0]);
-        }
-        let head = leaves[0];
-        let rest = self.build_equal_linear(&leaves[1..], axis)?;
-        Ok(self.new_internal_split(
-            axis,
-            head,
-            rest,
-            canonicalize_weights(1, (leaves.len() - 1) as u32),
-        ))
-    }
-
-    fn matches_balanced(&self, id: NodeId, leaves: &[NodeId], preset: BalancedPreset) -> bool {
-        if leaves.is_empty() {
-            return false;
-        }
-        if leaves.len() == 1 {
-            return self.tree.is_leaf(id) && id == leaves[0];
-        }
-        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
-            return false;
-        };
-        if split.axis != preset.start_axis {
-            return false;
-        }
-        let mid = leaves.len().div_ceil(2);
-        if split.weights != canonicalize_weights(mid as u32, (leaves.len() - mid) as u32) {
-            return false;
-        }
-        let next = BalancedPreset {
-            start_axis: if preset.alternate {
-                toggle_axis(preset.start_axis)
-            } else {
-                preset.start_axis
-            },
-            alternate: preset.alternate,
-        };
-        self.matches_balanced(split.a, &leaves[..mid], next)
-            && self.matches_balanced(split.b, &leaves[mid..], next)
-    }
-
-    fn matches_dwindle(&self, id: NodeId, leaves: &[NodeId], axis: Axis, slot: Slot) -> bool {
-        if leaves.is_empty() {
-            return false;
-        }
-        if leaves.len() == 1 {
-            return self.tree.is_leaf(id) && id == leaves[0];
-        }
-        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
-            return false;
-        };
-        if split.axis != axis || split.weights != WeightPair::default() {
-            return false;
-        }
-        match slot {
-            Slot::A => {
-                split.b == leaves[0]
-                    && self.tree.is_leaf(split.b)
-                    && self.matches_dwindle(split.a, &leaves[1..], toggle_axis(axis), slot)
-            }
-            Slot::B => {
-                split.a == leaves[0]
-                    && self.tree.is_leaf(split.a)
-                    && self.matches_dwindle(split.b, &leaves[1..], toggle_axis(axis), slot)
-            }
-        }
-    }
-
-    fn matches_tall(&self, id: NodeId, leaves: &[NodeId], preset: TallPreset) -> bool {
-        if leaves.is_empty() {
-            return false;
-        }
-        if leaves.len() == 1 {
-            return self.tree.is_leaf(id) && id == leaves[0];
-        }
-        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
-            return false;
-        };
-        if split.axis != Axis::X || split.weights != preset.root_weights {
-            return false;
-        }
-        match preset.master_slot {
-            Slot::A => {
-                split.a == leaves[0]
-                    && self.tree.is_leaf(split.a)
-                    && self.matches_equal_linear(split.b, &leaves[1..], Axis::Y)
-            }
-            Slot::B => {
-                split.b == leaves[0]
-                    && self.tree.is_leaf(split.b)
-                    && self.matches_equal_linear(split.a, &leaves[1..], Axis::Y)
-            }
-        }
-    }
-
-    fn matches_wide(&self, id: NodeId, leaves: &[NodeId], preset: WidePreset) -> bool {
-        if leaves.is_empty() {
-            return false;
-        }
-        if leaves.len() == 1 {
-            return self.tree.is_leaf(id) && id == leaves[0];
-        }
-        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
-            return false;
-        };
-        if split.axis != Axis::Y || split.weights != preset.root_weights {
-            return false;
-        }
-        match preset.master_slot {
-            Slot::A => {
-                split.a == leaves[0]
-                    && self.tree.is_leaf(split.a)
-                    && self.matches_equal_linear(split.b, &leaves[1..], Axis::X)
-            }
-            Slot::B => {
-                split.b == leaves[0]
-                    && self.tree.is_leaf(split.b)
-                    && self.matches_equal_linear(split.a, &leaves[1..], Axis::X)
-            }
-        }
-    }
-
-    fn matches_equal_linear(&self, id: NodeId, leaves: &[NodeId], axis: Axis) -> bool {
-        if leaves.is_empty() {
-            return false;
-        }
-        if leaves.len() == 1 {
-            return self.tree.is_leaf(id) && id == leaves[0];
-        }
-        let Some(split) = self.tree.nodes.get(&id).and_then(Node::as_split) else {
-            return false;
-        };
-        split.axis == axis
-            && split.weights == canonicalize_weights(1, (leaves.len() - 1) as u32)
-            && split.a == leaves[0]
-            && self.tree.is_leaf(split.a)
-            && self.matches_equal_linear(split.b, &leaves[1..], axis)
     }
 
     fn rebalance_subtree(&mut self, id: NodeId, mode: RebalanceMode) -> Result<u32, OpError> {
@@ -758,19 +494,6 @@ impl<T> Session<T> {
         Ok(())
     }
 
-    fn new_internal_split(
-        &mut self,
-        axis: Axis,
-        a: NodeId,
-        b: NodeId,
-        weights: WeightPair,
-    ) -> NodeId {
-        let split_id = self.tree.new_split(axis, a, b, weights);
-        self.tree.set_parent(a, Some(split_id));
-        self.tree.set_parent(b, Some(split_id));
-        split_id
-    }
-
     fn wrap_existing_with_leaf(
         &mut self,
         existing: NodeId,
@@ -793,7 +516,7 @@ impl<T> Session<T> {
                 self.tree.set_parent(split_id, Some(parent));
             }
             None => {
-                self.tree.root = Some(split_id);
+                self.tree.set_root(Some(split_id));
                 self.tree.set_parent(split_id, None);
             }
         }
@@ -806,7 +529,7 @@ impl<T> Session<T> {
         old_selection: Option<NodeId>,
         replacement_site: Option<NodeId>,
     ) {
-        self.focus = if self.tree.root.is_none() {
+        self.focus = if self.tree.root_id().is_none() {
             None
         } else if self.tree.is_leaf(old_focus) {
             Some(old_focus)
@@ -814,7 +537,7 @@ impl<T> Session<T> {
             replacement_site.and_then(|id| self.tree.first_leaf(id))
         };
 
-        self.selection = match (self.tree.root, self.focus) {
+        self.selection = match (self.tree.root_id(), self.focus) {
             (None, _) | (_, None) => None,
             (Some(_), Some(focus)) => old_selection
                 .filter(|selection| self.tree.contains(*selection))
@@ -854,7 +577,7 @@ impl<T> Session<T> {
         }
     }
 
-    fn focus_leaf(&self) -> Result<NodeId, OpError> {
+    fn require_focus_leaf(&self) -> Result<NodeId, OpError> {
         let focus = self.focus.ok_or(OpError::Empty)?;
         if self.tree.is_leaf(focus) {
             Ok(focus)
@@ -864,11 +587,7 @@ impl<T> Session<T> {
     }
 
     fn split_mut(&mut self, id: NodeId) -> Result<&mut SplitNode, OpError> {
-        self.tree
-            .nodes
-            .get_mut(&id)
-            .and_then(Node::as_split_mut)
-            .ok_or(OpError::NotSplit(id))
+        self.tree.split_mut(id).ok_or(OpError::NotSplit(id))
     }
 
     fn require_node(&self, id: NodeId) -> Result<(), OpError> {
@@ -879,99 +598,17 @@ impl<T> Session<T> {
         }
     }
 
+    fn require_leaf(&self, id: NodeId) -> Result<(), OpError> {
+        self.require_node(id)?;
+        if self.tree.is_leaf(id) {
+            Ok(())
+        } else {
+            Err(OpError::NotLeaf(id))
+        }
+    }
+
     fn bump_revision(&mut self) {
         self.revision += 1;
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EligibleSplit {
-    split: NodeId,
-    total: u32,
-    current_a: u32,
-    lo: u32,
-    hi: u32,
-}
-
-fn distribute_resize(
-    amount: u32,
-    strategy: ResizeStrategy,
-    sign: i8,
-    eligible: &[EligibleSplit],
-) -> Vec<(NodeId, u32)> {
-    match strategy {
-        ResizeStrategy::Local => eligible
-            .first()
-            .map(|entry| (entry.split, amount.min(entry.slack(sign))))
-            .into_iter()
-            .collect(),
-        ResizeStrategy::AncestorChain => {
-            let mut remaining = amount;
-            let mut out = Vec::new();
-            for entry in eligible {
-                if remaining == 0 {
-                    break;
-                }
-                let delta = remaining.min(entry.slack(sign));
-                if delta != 0 {
-                    out.push((entry.split, delta));
-                    remaining -= delta;
-                }
-            }
-            out
-        }
-        ResizeStrategy::DistributedBySlack => {
-            let total_slack = eligible.iter().map(|entry| entry.slack(sign)).sum::<u32>();
-            if total_slack == 0 {
-                return Vec::new();
-            }
-            let request = amount.min(total_slack);
-            let mut assigned = 0_u32;
-            let mut allocations = eligible
-                .iter()
-                .enumerate()
-                .map(|(idx, entry)| {
-                    let slack = entry.slack(sign);
-                    let product = u128::from(request) * u128::from(slack);
-                    let base = u32::try_from(product / u128::from(total_slack))
-                        .expect("base resize share exceeds u32");
-                    let remainder = u32::try_from(product % u128::from(total_slack))
-                        .expect("remainder exceeds u32");
-                    assigned += base;
-                    (idx, entry.split, slack, base.min(slack), remainder)
-                })
-                .collect::<Vec<_>>();
-            let mut leftover = request - assigned;
-            allocations
-                .sort_by_key(|(idx, _, _, _, remainder)| (std::cmp::Reverse(*remainder), *idx));
-            for (_, _, slack, base, _) in &mut allocations {
-                if leftover == 0 {
-                    break;
-                }
-                if *base < *slack {
-                    *base += 1;
-                    leftover -= 1;
-                }
-            }
-            allocations.sort_by_key(|(idx, ..)| *idx);
-            allocations
-                .into_iter()
-                .filter_map(|(_, split, _, base, _)| (base != 0).then_some((split, base)))
-                .collect()
-        }
-    }
-}
-
-impl EligibleSplit {
-    fn slack(self, sign: i8) -> u32 {
-        if self.lo > self.hi {
-            return 0;
-        }
-        if sign > 0 {
-            self.hi.saturating_sub(self.current_a)
-        } else {
-            self.current_a.saturating_sub(self.lo)
-        }
     }
 }
 
@@ -1005,7 +642,7 @@ fn remaining_subtree_after_detach<T>(
     if current == removed {
         return None;
     }
-    match tree.nodes.get(&current)? {
+    match tree.node(current)? {
         Node::Leaf(_) => Some(current),
         Node::Split(split) => match (
             remaining_subtree_after_detach(tree, split.a, removed),
@@ -1022,13 +659,6 @@ fn toggle_axis(axis: Axis) -> Axis {
     match axis {
         Axis::X => Axis::Y,
         Axis::Y => Axis::X,
-    }
-}
-
-fn resize_sign(dir: Direction, outward: bool) -> i8 {
-    match (dir, outward) {
-        (Direction::Right | Direction::Down, true) | (Direction::Left | Direction::Up, false) => 1,
-        (Direction::Left | Direction::Up, true) | (Direction::Right | Direction::Down, false) => -1,
     }
 }
 

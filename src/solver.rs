@@ -136,7 +136,8 @@ pub fn score(spec: PairSpec, a: u32, policy: &SolverPolicy) -> ScoreTuple {
 }
 
 fn pref_penalty(total: u32, a: u32, wa: u32, wb: u32) -> u128 {
-    let left = u128::from(a) * u128::from(wa + wb);
+    let total_weight = u128::from(wa) + u128::from(wb);
+    let left = u128::from(a) * total_weight;
     let right = u128::from(total) * u128::from(wa);
     left.abs_diff(right)
 }
@@ -160,7 +161,7 @@ pub fn solve_with_revision<T>(
         violations: Vec::new(),
         strict_feasible: true,
     };
-    let Some(root_id) = tree.root else {
+    let Some(root_id) = tree.root_id() else {
         return Ok(snapshot);
     };
     let mut summaries = HashMap::new();
@@ -205,11 +206,7 @@ pub fn summarize<T>(
     if let Some(summary) = out.get(&id).copied() {
         return Ok(summary);
     }
-    let summary = match tree
-        .nodes
-        .get(&id)
-        .ok_or(ValidationError::MissingNode(id))?
-    {
+    let summary = match tree.node(id).ok_or(ValidationError::MissingNode(id))? {
         Node::Leaf(leaf) => Summary {
             min_w: leaf.meta.limits.min_w,
             min_h: leaf.meta.limits.min_h,
@@ -224,22 +221,22 @@ pub fn summarize<T>(
             let b = summarize(tree, split.b, out)?;
             match split.axis {
                 Axis::X => Summary {
-                    min_w: a.min_w + b.min_w,
+                    min_w: checked_add_u32(a.min_w, b.min_w, id, "min_w")?,
                     min_h: a.min_h.max(b.min_h),
-                    max_w: add_option(a.max_w, b.max_w),
+                    max_w: checked_add_option_u32(a.max_w, b.max_w, id, "max_w")?,
                     max_h: min_option(a.max_h, b.max_h),
-                    leaf_count: a.leaf_count + b.leaf_count,
-                    shrink_cost: a.shrink_cost + b.shrink_cost,
-                    grow_cost: a.grow_cost + b.grow_cost,
+                    leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
+                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
+                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
                 },
                 Axis::Y => Summary {
                     min_w: a.min_w.max(b.min_w),
-                    min_h: a.min_h + b.min_h,
+                    min_h: checked_add_u32(a.min_h, b.min_h, id, "min_h")?,
                     max_w: min_option(a.max_w, b.max_w),
-                    max_h: add_option(a.max_h, b.max_h),
-                    leaf_count: a.leaf_count + b.leaf_count,
-                    shrink_cost: a.shrink_cost + b.shrink_cost,
-                    grow_cost: a.grow_cost + b.grow_cost,
+                    max_h: checked_add_option_u32(a.max_h, b.max_h, id, "max_h")?,
+                    leaf_count: checked_add_u32(a.leaf_count, b.leaf_count, id, "leaf_count")?,
+                    shrink_cost: checked_add_u64(a.shrink_cost, b.shrink_cost, id, "shrink_cost")?,
+                    grow_cost: checked_add_u64(a.grow_cost, b.grow_cost, id, "grow_cost")?,
                 },
             }
         }
@@ -248,10 +245,35 @@ pub fn summarize<T>(
     Ok(summary)
 }
 
-fn add_option(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+fn checked_add_u32(
+    a: u32,
+    b: u32,
+    node: NodeId,
+    field: &'static str,
+) -> Result<u32, ValidationError> {
+    a.checked_add(b)
+        .ok_or(ValidationError::ArithmeticOverflow { node, field })
+}
+
+fn checked_add_u64(
+    a: u64,
+    b: u64,
+    node: NodeId,
+    field: &'static str,
+) -> Result<u64, ValidationError> {
+    a.checked_add(b)
+        .ok_or(ValidationError::ArithmeticOverflow { node, field })
+}
+
+fn checked_add_option_u32(
+    a: Option<u32>,
+    b: Option<u32>,
+    node: NodeId,
+    field: &'static str,
+) -> Result<Option<u32>, ValidationError> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(a + b),
-        _ => None,
+        (Some(a), Some(b)) => checked_add_u32(a, b, node, field).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -274,8 +296,7 @@ fn solve_node<T>(
 ) -> Result<(), SolveError> {
     out.node_rects.insert(id, rect);
     match tree
-        .nodes
-        .get(&id)
+        .node(id)
         .ok_or(SolveError::Validation(ValidationError::MissingNode(id)))?
     {
         Node::Leaf(leaf) => {

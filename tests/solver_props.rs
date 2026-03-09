@@ -7,10 +7,21 @@ use common::{
     stressed_policy,
 };
 use libtiler::{
-    Axis, LeafMeta, PairSpec, Session, Slot, SolverPolicy, choose_extent_with_score, solve_strict,
-    summarize,
+    Axis, LeafMeta, PairSpec, Session, Slot, SolveError, SolverPolicy, Tree, ValidationError,
+    WeightPair, choose_extent_with_score, solve, summarize,
 };
 use proptest::prelude::*;
+
+fn two_leaf_tree(left: LeafMeta, right: LeafMeta) -> Tree<u8> {
+    let mut tree = Tree::new();
+    let a = tree.new_leaf(1, left);
+    let b = tree.new_leaf(2, right);
+    let split = tree.new_split(Axis::X, a, b, WeightPair::default());
+    tree.set_root(Some(split));
+    tree.set_parent(a, Some(split));
+    tree.set_parent(b, Some(split));
+    tree
+}
 
 proptest! {
     #[test]
@@ -54,7 +65,7 @@ proptest! {
         let root = root_rect(w, h);
         let policy = stressed_policy(seed);
         let production = session.solve(root, &policy);
-        let reference = solve_reference(&session.tree, session.revision, root, &policy);
+        let reference = solve_reference(session.tree(), session.revision(), root, &policy);
         prop_assert_eq!(&production.node_rects, &reference.node_rects);
         prop_assert_eq!(&production.violations, &reference.violations);
         prop_assert_eq!(production.strict_feasible, reference.strict_feasible);
@@ -65,19 +76,39 @@ proptest! {
         let replay = decoded.solve(root, &policy);
         prop_assert_eq!(production, replay);
     }
+
+    #[test]
+    fn reference_solver_is_deterministic(bytes in prop::collection::vec(any::<u8>(), 1..48), w in 0_u32..9, h in 0_u32..9, seed in any::<u8>()) {
+        let session = exercise_trace(&bytes);
+        let root = root_rect(w, h);
+        let policy = stressed_policy(seed);
+
+        prop_assert_eq!(
+            solve_reference(session.tree(), session.revision(), root, &policy),
+            solve_reference(session.tree(), session.revision(), root, &policy),
+        );
+    }
 }
 
 #[test]
 fn summary_matches_bruteforce_feasibility_envelope() {
     let session = exercise_trace(&[0, 1, 7, 0, 3, 6, 5, 2, 8, 11, 4, 10]);
-    let root = session.tree.root.expect("non-empty session");
+    let root = session.tree().root_id().expect("non-empty session");
     let mut summaries = HashMap::new();
-    let summary = summarize(&session.tree, root, &mut summaries).expect("summary should build");
+    let summary = summarize(session.tree(), root, &mut summaries).expect("summary should build");
     let policy = SolverPolicy::default();
 
     let strict_pairs = (0_u32..=20)
         .flat_map(|w| (0_u32..=20).map(move |h| (w, h)))
-        .filter(|(w, h)| solve_strict(&session.tree, root_rect(*w, *h), &policy).is_ok())
+        .filter(|(w, h)| {
+            solve_reference(
+                session.tree(),
+                session.revision(),
+                root_rect(*w, *h),
+                &policy,
+            )
+            .strict_feasible
+        })
         .collect::<Vec<_>>();
 
     let min_w = strict_pairs
@@ -90,19 +121,27 @@ fn summary_matches_bruteforce_feasibility_envelope() {
         .map(|(_, h)| *h)
         .min()
         .expect("some strict solution should exist");
-    let max_w = strict_pairs.iter().map(|(w, _)| *w).max();
-    let max_h = strict_pairs.iter().map(|(_, h)| *h).max();
+    let max_w = strict_pairs
+        .iter()
+        .map(|(w, _)| *w)
+        .max()
+        .expect("strict widths should exist");
+    let max_h = strict_pairs
+        .iter()
+        .map(|(_, h)| *h)
+        .max()
+        .expect("strict heights should exist");
 
     assert_eq!(summary.min_w, min_w);
     assert_eq!(summary.min_h, min_h);
-    assert_eq!(
-        summary.max_w.unwrap_or(20),
-        max_w.expect("strict widths should exist")
-    );
-    assert_eq!(
-        summary.max_h.unwrap_or(20),
-        max_h.expect("strict heights should exist")
-    );
+    match summary.max_w {
+        Some(value) => assert_eq!(value, max_w),
+        None => assert_eq!(max_w, 20),
+    }
+    match summary.max_h {
+        Some(value) => assert_eq!(value, max_h),
+        None => assert_eq!(max_h, 20),
+    }
 }
 
 #[test]
@@ -117,13 +156,24 @@ fn scale_symmetry_holds_with_exact_integer_arithmetic() {
     let _c = session
         .split_focus(Axis::Y, Slot::B, 3_u16, LeafMeta::default(), None)
         .expect("split y");
-    let mut scaled = session.clone();
-    for node in scaled.tree.nodes.values_mut() {
-        if let libtiler::Node::Leaf(leaf) = node {
-            leaf.meta.limits.min_w *= 3;
-            leaf.meta.limits.min_h *= 3;
-        }
-    }
+    let scaled_meta = LeafMeta {
+        limits: libtiler::SizeLimits {
+            min_w: 3,
+            min_h: 3,
+            ..LeafMeta::default().limits
+        },
+        ..LeafMeta::default()
+    };
+    let mut scaled = Session::new();
+    let _a = scaled
+        .insert_root(1_u16, scaled_meta.clone())
+        .expect("insert scaled root");
+    let _b = scaled
+        .split_focus(Axis::X, Slot::B, 2_u16, scaled_meta.clone(), None)
+        .expect("split scaled x");
+    let _c = scaled
+        .split_focus(Axis::Y, Slot::B, 3_u16, scaled_meta, None)
+        .expect("split scaled y");
     let policy = SolverPolicy::default();
     let base = session.solve(root_rect(12, 12), &policy);
     let scaled_snap = scaled.solve(root_rect(36, 36), &policy);
@@ -135,4 +185,104 @@ fn scale_symmetry_holds_with_exact_integer_arithmetic() {
         assert_eq!(scaled_rect.w, rect.w * 3);
         assert_eq!(scaled_rect.h, rect.h * 3);
     }
+}
+
+#[test]
+fn solver_handles_maximal_weights_without_panicking() {
+    let mut session = Session::new();
+    let _ = session
+        .insert_root(1_u8, LeafMeta::default())
+        .expect("insert root");
+    let _ = session
+        .split_focus(
+            Axis::X,
+            Slot::B,
+            2_u8,
+            LeafMeta::default(),
+            Some(WeightPair {
+                a: u32::MAX,
+                b: u32::MAX,
+            }),
+        )
+        .expect("split root");
+
+    let snapshot = solve(session.tree(), root_rect(12, 5), &SolverPolicy::default())
+        .expect("maximal weights should remain solvable");
+
+    assert!(snapshot.strict_feasible);
+    assert_eq!(snapshot.rect(1).expect("left rect").w, 6);
+    assert_eq!(snapshot.rect(2).expect("right rect").w, 6);
+}
+
+#[test]
+fn summarize_rejects_min_width_sum_overflow() {
+    let huge = LeafMeta {
+        limits: libtiler::SizeLimits {
+            min_w: u32::MAX,
+            ..LeafMeta::default().limits
+        },
+        ..LeafMeta::default()
+    };
+    let tree = two_leaf_tree(huge.clone(), huge);
+    let root = tree.root_id().expect("split root");
+    assert_eq!(
+        summarize(&tree, root, &mut HashMap::new()),
+        Err(ValidationError::ArithmeticOverflow {
+            node: root,
+            field: "min_w",
+        })
+    );
+    assert!(matches!(
+        solve(&tree, root_rect(8, 4), &SolverPolicy::default()),
+        Err(SolveError::Validation(ValidationError::ArithmeticOverflow {
+            node,
+            field: "min_w",
+        })) if node == root
+    ));
+}
+
+#[test]
+fn summarize_rejects_finite_max_width_sum_overflow() {
+    let bounded = LeafMeta {
+        limits: libtiler::SizeLimits {
+            max_w: Some(u32::MAX),
+            ..LeafMeta::default().limits
+        },
+        ..LeafMeta::default()
+    };
+    let tree = two_leaf_tree(bounded.clone(), bounded);
+    let root = tree.root_id().expect("split root");
+
+    assert_eq!(
+        summarize(&tree, root, &mut HashMap::new()),
+        Err(ValidationError::ArithmeticOverflow {
+            node: root,
+            field: "max_w",
+        })
+    );
+}
+
+#[test]
+fn session_try_solve_reports_unrepresentable_summary_overflow() {
+    let huge = LeafMeta {
+        limits: libtiler::SizeLimits {
+            min_w: u32::MAX,
+            ..LeafMeta::default().limits
+        },
+        ..LeafMeta::default()
+    };
+    let mut session = Session::new();
+    let _ = session
+        .insert_root(1_u8, huge.clone())
+        .expect("insert root");
+    let _ = session
+        .split_focus(Axis::X, Slot::B, 2_u8, huge, None)
+        .expect("split root");
+
+    assert!(matches!(
+        session.try_solve(root_rect(8, 4), &SolverPolicy::default()),
+        Err(SolveError::Validation(
+            ValidationError::ArithmeticOverflow { field: "min_w", .. }
+        ))
+    ));
 }

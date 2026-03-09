@@ -74,9 +74,9 @@ impl<T> Node<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tree<T> {
-    pub root: Option<NodeId>,
-    pub nodes: HashMap<NodeId, Node<T>>,
-    pub next_id: NodeId,
+    root: Option<NodeId>,
+    nodes: HashMap<NodeId, Node<T>>,
+    next_id: NodeId,
 }
 
 impl<T> Default for Tree<T> {
@@ -93,6 +93,51 @@ impl<T> Tree<T> {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn root_id(&self) -> Option<NodeId> {
+        self.root
+    }
+
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<&Node<T>> {
+        self.nodes.get(&id)
+    }
+
+    #[must_use]
+    pub fn split(&self, id: NodeId) -> Option<&SplitNode> {
+        self.node(id).and_then(Node::as_split)
+    }
+
+    #[must_use]
+    pub fn leaf(&self, id: NodeId) -> Option<&LeafNode<T>> {
+        self.node(id).and_then(Node::as_leaf)
+    }
+
+    #[must_use]
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.keys().copied().collect()
+    }
+
+    #[must_use]
+    pub fn split_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter_map(|(id, node)| matches!(node, Node::Split(_)).then_some(*id))
+            .collect()
+    }
+
+    pub fn set_root(&mut self, root: Option<NodeId>) {
+        self.root = root;
+    }
+
+    pub(crate) fn split_mut(&mut self, id: NodeId) -> Option<&mut SplitNode> {
+        self.nodes.get_mut(&id).and_then(Node::as_split_mut)
+    }
+
+    pub(crate) fn remove_node(&mut self, id: NodeId) -> Option<Node<T>> {
+        self.nodes.remove(&id)
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {

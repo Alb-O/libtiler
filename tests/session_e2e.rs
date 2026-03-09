@@ -39,7 +39,7 @@ fn end_to_end_structural_edit_navigation_resize_flow() {
         .focus_dir(Direction::Right, &snap)
         .expect("move focus right");
     let before = session.solve(root, &SolverPolicy::default());
-    let focused = session.focus.expect("focus should exist");
+    let focused = session.focus().expect("focus should exist");
     let before_rect = before.rect(focused).expect("focus rect should exist");
     session
         .grow_focus(Direction::Down, 3, ResizeStrategy::Local, &before)
@@ -60,80 +60,106 @@ fn end_to_end_structural_edit_navigation_resize_flow() {
 fn mirror_swap_and_move_round_trip_behaviors_hold() {
     let mut session = exercise_trace(&[0, 1, 0, 6, 11, 5, 7, 8]);
     let original = session.clone();
-    let root_id = session.tree.root.expect("non-empty tree");
-    session.selection = Some(root_id);
+    let root_id = session.tree().root_id().expect("non-empty tree");
+    session.set_selection(root_id).expect("select root");
     session.mirror_selection(Axis::X).expect("mirror x");
     session.mirror_selection(Axis::X).expect("mirror x again");
-    assert_eq!(session.tree, original.tree);
+    assert_eq!(session.tree(), original.tree());
 
-    let nodes = session.tree.nodes.keys().copied().collect::<Vec<_>>();
+    let nodes = session.tree().node_ids();
     let (a, b) = nodes
         .iter()
         .enumerate()
         .find_map(|(idx, a)| {
             nodes.iter().skip(idx + 1).find_map(|b| {
-                (!session.tree.contains_in_subtree(*a, *b)
-                    && !session.tree.contains_in_subtree(*b, *a))
+                (!session.tree().contains_in_subtree(*a, *b)
+                    && !session.tree().contains_in_subtree(*b, *a))
                 .then_some((*a, *b))
             })
         })
         .expect("need a disjoint swap pair");
     session.swap_nodes(a, b).expect("first swap");
     session.swap_nodes(a, b).expect("second swap");
-    assert_eq!(session.tree, original.tree);
+    assert_eq!(session.tree(), original.tree());
 }
 
 #[test]
 fn split_remove_roundtrip_returns_original_layout() {
     let mut session = exercise_trace(&[0, 1, 0, 3]);
-    let original_nodes = session.tree.nodes.clone();
-    let original_root = session.tree.root;
+    let original_root = session.tree().root_id();
+    let mut original_nodes = session
+        .tree()
+        .node_ids()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                session.tree().node(id).expect("node should exist").clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    original_nodes.sort_by_key(|(id, _)| *id);
     let original_snap = session.solve(root_rect(20, 10), &SolverPolicy::default());
     let new_leaf = session
         .split_focus(Axis::X, Slot::B, 99_u16, LeafMeta::default(), None)
         .expect("split focus");
-    session.focus = Some(new_leaf);
-    session.selection = Some(new_leaf);
+    session
+        .set_selection(new_leaf)
+        .expect("select inserted leaf");
     session.remove_focus().expect("remove inserted leaf");
     let roundtrip = session.solve(root_rect(20, 10), &SolverPolicy::default());
 
-    assert_eq!(session.tree.root, original_root);
-    assert_eq!(session.tree.nodes, original_nodes);
+    let mut roundtrip_nodes = session
+        .tree()
+        .node_ids()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                session.tree().node(id).expect("node should exist").clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    roundtrip_nodes.sort_by_key(|(id, _)| *id);
+    assert_eq!(session.tree().root_id(), original_root);
+    assert_eq!(roundtrip_nodes, original_nodes);
     assert_eq!(roundtrip.node_rects, original_snap.node_rects);
 }
 
 #[test]
 fn rebalance_and_preset_are_idempotent_after_first_application() {
     let mut session = exercise_trace(&[0, 1, 0, 1, 6, 6]);
-    let root = session.tree.root.expect("non-empty tree");
-    session.selection = Some(root);
+    let root = session.tree().root_id().expect("non-empty tree");
+    session.set_selection(root).expect("select root");
     session
         .rebalance_selection(RebalanceMode::LeafCount)
         .expect("first rebalance");
-    let rebalanced = session.tree.clone();
+    let rebalanced = session.tree().clone();
     session
         .rebalance_selection(RebalanceMode::LeafCount)
         .expect("second rebalance");
-    assert_eq!(session.tree, rebalanced);
+    assert_eq!(session.tree(), &rebalanced);
 
-    session.selection = Some(root);
+    session.set_selection(root).expect("reselect root");
     let preset = PresetKind::Balanced(BalancedPreset {
         start_axis: Axis::X,
         alternate: true,
     });
     session.apply_preset(preset).expect("first preset");
-    let preset_tree = session.tree.clone();
-    session.selection = session.tree.root;
+    let preset_tree = session.tree().clone();
+    session
+        .set_selection(session.tree().root_id().expect("root should exist"))
+        .expect("select rebuilt root");
     session.apply_preset(preset).expect("second preset");
-    assert_eq!(session.tree, preset_tree);
+    assert_eq!(session.tree(), &preset_tree);
 }
 
 #[test]
 fn tall_and_wide_presets_keep_leaf_identity_and_validate() {
     let mut session = exercise_trace(&[0, 1, 0, 1, 0]);
     let before_leaves = leaf_ids(&session);
-    let root = session.tree.root.expect("non-empty tree");
-    session.selection = Some(root);
+    let root = session.tree().root_id().expect("non-empty tree");
+    session.set_selection(root).expect("select root");
     session
         .apply_preset(PresetKind::Tall(TallPreset {
             master_slot: Slot::A,
@@ -143,7 +169,9 @@ fn tall_and_wide_presets_keep_leaf_identity_and_validate() {
     let after_tall = leaf_ids(&session);
     assert_eq!(before_leaves, after_tall);
 
-    session.selection = session.tree.root;
+    session
+        .set_selection(session.tree().root_id().expect("root should exist"))
+        .expect("select rebuilt root");
     session
         .apply_preset(PresetKind::Wide(WidePreset {
             master_slot: Slot::B,
@@ -180,8 +208,8 @@ fn mirror_x_matches_geometric_reflection() {
     let root = root_rect(18, 12);
     let original = session.solve(root, &SolverPolicy::default());
 
-    let root_id = session.tree.root.expect("non-empty tree");
-    session.selection = Some(root_id);
+    let root_id = session.tree().root_id().expect("non-empty tree");
+    session.set_selection(root_id).expect("select root");
     session.mirror_selection(Axis::X).expect("mirror selection");
     let mirrored = session.solve(root, &SolverPolicy::default());
 
@@ -224,18 +252,17 @@ fn move_selection_supports_ancestor_targets() {
     let b = session
         .split_focus(Axis::X, Slot::B, 2_u16, LeafMeta::default(), None)
         .expect("split x");
-    session.focus = Some(b);
-    session.selection = Some(b);
+    session.set_selection(b).expect("select leaf b");
     let _c = session
         .split_focus(Axis::Y, Slot::B, 3_u16, LeafMeta::default(), None)
         .expect("split y");
 
-    let ancestor_target = session.tree.root.expect("root should exist");
-    let selected = session.selection.expect("selection should exist");
+    let ancestor_target = session.tree().root_id().expect("root should exist");
+    let selected = session.selection().expect("selection should exist");
     session
         .move_selection_as_sibling_of(ancestor_target, Axis::X, Slot::B)
         .expect("move next to ancestor target");
 
-    assert!(session.tree.contains(selected));
+    assert!(session.tree().contains(selected));
     assert!(session.validate().is_ok());
 }

@@ -23,7 +23,7 @@ pub fn best_neighbor<T>(
 ) -> Option<NodeId> {
     let current_rect = leaf_rects.get(&current).copied()?;
     let order = tree
-        .root
+        .root_id()
         .map(|root| tree.leaf_ids_dfs(root))
         .unwrap_or_default();
     let order_rank = order

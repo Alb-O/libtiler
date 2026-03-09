@@ -7,6 +7,10 @@ pub enum ValidationError {
     MissingRoot(NodeId),
     RootHasParent(NodeId),
     MissingNode(NodeId),
+    ArithmeticOverflow {
+        node: NodeId,
+        field: &'static str,
+    },
     ParentMismatch {
         node: NodeId,
         expected: NodeId,
