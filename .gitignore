@@ -35,7 +35,7 @@ rustfmt.toml
 
 # Managed Cargo: generated from Cargo.dvnv.toml + shared catalog.
 # Keep this ignored only in repos that opt into managed Cargo generation.
-Cargo.toml
+/Cargo.toml
 
 # -----------------------------------------------------------------------------
 # Rust
